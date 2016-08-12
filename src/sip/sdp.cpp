@@ -150,15 +150,18 @@ Sdp::generateSdesAttribute()
 {
     static constexpr const unsigned cryptoSuite = 0;
     std::vector<uint8_t> keyAndSalt;
+#if 0
     keyAndSalt.resize(ring::CryptoSuites[cryptoSuite].masterKeyLength / 8
                     + ring::CryptoSuites[cryptoSuite].masterSaltLength/ 8);
+#endif
+    keyAndSalt.resize(32+12); // AES-GCM-256 master-key + salt
     // generate keys
     randomFill(keyAndSalt);
 
     std::string tag = "1";
     std::string crypto_attr = tag + " "
-                            + ring::CryptoSuites[cryptoSuite].name
-                            + " inline:" + base64::encode(keyAndSalt);
+		+ ring::CryptoSuites[cryptoSuite].name
+		+ " inline:" + base64::encode(keyAndSalt);
     RING_DBG("%s", crypto_attr.c_str());
 
     pj_str_t val { (char*) crypto_attr.c_str(),

@@ -195,6 +195,7 @@ TlsSession::TlsSession(const std::shared_ptr<IceTransport>& ice, int ice_comp_id
     , params_(params)
     , callbacks_(cbs)
     , anonymous_(anonymous)
+    , rxFlushTask_ {std::make_shared<Task>([this](Task& task){ if (flushRxQueue()) task.schedule(RX_OOO_TIMEOUT); })}
     , cacred_(nullptr)
     , sacred_(nullptr)
     , xcred_(nullptr)
@@ -215,8 +216,6 @@ TlsSession::TlsSession(const std::shared_ptr<IceTransport>& ice, int ice_comp_id
             return len;
         });
 
-    Manager::instance().registerEventHandler((uintptr_t)this, [this]{ flushRxQueue(); });
-
     // Run FSM into dedicated thread
     thread_.start();
 }
@@ -227,8 +226,7 @@ TlsSession::~TlsSession()
     thread_.join();
 
     socket_->setOnRecv(nullptr);
-
-    Manager::instance().unregisterEventHandler((uintptr_t)this);
+    flushRxQueue(); // let application receive last packets
 }
 
 const char*
@@ -899,28 +897,29 @@ TlsSession::handleDataPacket(std::vector<uint8_t>&& buf, const uint8_t* seq_byte
     if (reorderBuffer_.empty())
         lastReadTime_ = clock::now();
     reorderBuffer_.emplace(pkt_seq, std::move(buf));
+
+    // Ready to forward to application
+    rxFlushTask_->schedule();
 }
 
 ///
 /// Reorder and push received packet to upper layer
 ///
-/// \note This method must be called continously, faster than RX_OOO_TIMEOUT
+/// \return true if a delayed re-schedule is needed, else false.
 ///
-void
+bool
 TlsSession::flushRxQueue()
 {
     std::unique_lock<std::mutex> lk {reorderBufMutex_};
     if (reorderBuffer_.empty())
-        return;
+        return false;
 
     auto item = std::begin(reorderBuffer_);
     auto next_offset = item->first;
 
-    // Wait for next continous packet until timeou
-    if ((lastReadTime_ - clock::now()) >= RX_OOO_TIMEOUT) {
-        // OOO packet timeout - consider waited packets as lost
-    } else if (next_offset != gapOffset_)
-        return;
+    // First packet not the waited one and wait time not exhausted? Wait again!
+    if (next_offset != gapOffset_ and (lastReadTime_ - clock::now()) < RX_OOO_TIMEOUT)
+        return true;
 
     // Loop on offset-ordered received packet until a discontinuity in sequence number
     while (item != std::end(reorderBuffer_) and item->first <= next_offset) {
@@ -939,6 +938,8 @@ TlsSession::flushRxQueue()
 
     gapOffset_ = std::max(gapOffset_, next_offset);
     lastReadTime_ = clock::now();
+
+    return not reorderBuffer_.empty(); // try later if any waited packet
 }
 
 TlsSessionState

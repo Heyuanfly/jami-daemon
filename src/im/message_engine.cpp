@@ -66,11 +66,14 @@ MessageEngine::reschedule()
         return;
     std::weak_ptr<Account> w = std::static_pointer_cast<Account>(account_.shared_from_this());
     auto next = nextEvent();
-    if (next != clock::time_point::max())
-        Manager::instance().scheduleTask([w,this](){
-            if (auto s = w.lock())
-                retrySend();
-        }, next);
+    if (next != clock::time_point::max()) {
+        auto task = std::make_shared<Task>(
+            [w, this](UNUSED Task& task){
+                if (auto s = w.lock())
+                    retrySend();
+            });
+        task->schedule(next);
+    }
 }
 
 MessageEngine::clock::time_point

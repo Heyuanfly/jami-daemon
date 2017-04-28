@@ -48,6 +48,7 @@
 namespace ring {
 class IceTransport;
 class IceSocket;
+class Task;
 } // namespace ring
 
 namespace dht { namespace crypto {
@@ -222,6 +223,7 @@ private:
     uint64_t gapOffset_ {1}; // offset of first byte not received yet (start at 1)
     clock::time_point lastReadTime_;
     std::map<uint64_t, std::vector<uint8_t>> reorderBuffer_ {};
+    std::shared_ptr<Task> rxFlushTask_;
 
     ssize_t send_(const uint8_t* tx_data, std::size_t tx_size);
     ssize_t sendRaw(const void*, size_t);
@@ -230,7 +232,7 @@ private:
     int waitForRawData(unsigned);
 
     void handleDataPacket(std::vector<uint8_t>&&, const uint8_t*);
-    void flushRxQueue();
+    bool flushRxQueue();
 
     // Statistics
     std::atomic<std::size_t> stRxRawPacketCnt_ {0};

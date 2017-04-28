@@ -53,6 +53,50 @@ class Conference;
 class AudioLoop;
 class IceTransportFactory;
 
+///
+/// Simple (re-)schedulable task
+///
+/// The given callable is scheduled on demand by the process running Manager::pollEvents().
+///
+class Task : public std::enable_shared_from_this<Task>
+{
+public:
+    using Clock = std::chrono::steady_clock;
+    using TimePoint = Clock::time_point;
+    using Callback = std::function<void(Task&)>;
+
+    Task() = default;
+    explicit Task(Callback&& callable) : cb_(std::move(callable)) {}
+
+    // Moveable
+    Task(Task&&) noexcept = default;
+    Task& operator=(Task&&) noexcept = default;
+
+    ///
+    /// Schedule the callable at given absolute time
+    ///
+    void schedule(const TimePoint& when);
+
+    ///
+    /// Schedule the callable after given duration since the call instant.
+    ///
+    template<class Rep=int, class Period=std::ratio<1>>
+    void schedule(const std::chrono::duration<Rep, Period>& delay = std::chrono::duration<Rep, Period>::zero()) {
+        schedule(Clock::now() + delay);
+    }
+
+    void operator()() {
+        cb_(*this);
+    }
+
+private:
+    // Non-copiable
+    Task(const Task&) = delete;
+    Task& operator=(const Task&) = delete;
+
+    Callback cb_;
+};
+
 /** Manager (controller) of Ring daemon */
 class Manager {
     public:
@@ -818,8 +862,7 @@ class Manager {
 
         /**
          * Call periodically to poll for VoIP events */
-        void
-        pollEvents();
+        void pollEvents();
 
         /**
          * Create a new outgoing call
@@ -851,14 +894,18 @@ class Manager {
 
         IceTransportFactory& getIceTransportFactory();
 
-        void addTask(const std::function<bool()>&& task);
+        ///
+        /// Adding simple callable to be scheduled at next handleEvents() call.
+        ///
+        /// \note Deprecated, use Task objects
+        ///
+        void addTask(std::function<bool()>&& task);
 
-        struct Runnable {
-            std::function<void()> cb;
-            Runnable(const std::function<void()>&& t) : cb(std::move(t)) {}
-        };
-        std::shared_ptr<Runnable> scheduleTask(const std::function<void()>&& task, std::chrono::steady_clock::time_point when);
-        void scheduleTask(const std::shared_ptr<Runnable>& task, std::chrono::steady_clock::time_point when);
+        ///
+        /// Low-level way to insert a task to schedule, used by Task itself.
+        ///
+        /// \note Prefer Task's methods than this one.
+        void scheduleTask(const std::shared_ptr<Task>& task, const Task::TimePoint& when);
 
 #ifdef RING_VIDEO
         /**

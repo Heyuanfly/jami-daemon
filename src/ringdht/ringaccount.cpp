@@ -118,8 +118,7 @@ struct RingAccount::BuddyInfo
     /* the presence timestamps */
     std::map<dht::InfoHash, std::chrono::steady_clock::time_point> devicesTimestamps;
 
-    /* The callable object to update buddy info */
-    std::function<void()> updateInfo {};
+    std::shared_ptr<Task> refreshTask; ///< Refresh task to schedule
 
     BuddyInfo(dht::InfoHash id) : id(id) {}
 };
@@ -1991,27 +1990,23 @@ RingAccount::trackBuddyPresence(const std::string& buddy_id)
     auto buddy_infop = trackedBuddies_.emplace(h, decltype(trackedBuddies_)::mapped_type {h});
     if (buddy_infop.second) {
         auto& buddy_info = buddy_infop.first->second;
-        buddy_info.updateInfo = Manager::instance().scheduleTask([h,weak_this]() {
+        buddy_info.refreshTask = std::make_shared<Task>([h, weak_this](UNUSED Task& task) {
             if (auto shared_this = weak_this.lock()) {
                 /* ::forEachDevice call will update buddy info accordingly. */
                 shared_this->forEachDevice(h, {}, [h, weak_this] (bool /* ok */) {
                     if (auto shared_this = weak_this.lock()) {
                         std::lock_guard<std::recursive_mutex> lock(shared_this->buddyInfoMtx);
                         auto buddy_info_it = shared_this->trackedBuddies_.find(h);
-                        if (buddy_info_it == shared_this->trackedBuddies_.end()) return;
+                        if (buddy_info_it == shared_this->trackedBuddies_.end())
+                            return;
 
                         auto& buddy_info = buddy_info_it->second;
-                        if (buddy_info.updateInfo) {
-                            auto cb = buddy_info.updateInfo;
-                            Manager::instance().scheduleTask(
-                                std::move(cb),
-                                std::chrono::steady_clock::now() + DeviceAnnouncement::TYPE.expiration
-                            );
-                        }
+                        buddy_info.refreshTask->schedule(DeviceAnnouncement::TYPE.expiration);
                     }
                 });
             }
-        }, std::chrono::steady_clock::now())->cb;
+        });
+        buddy_info.refreshTask->schedule();
         RING_DBG("Now tracking buddy %s", h.toString().c_str());
     } else
         RING_WARN("Buddy %s is already being tracked.", h.toString().c_str());
@@ -3326,7 +3321,7 @@ RingAccount::sendTextMessage(const std::string& to, const std::map<std::string, 
 
     // Timeout cleanup
     std::weak_ptr<RingAccount> wshared = shared();
-    Manager::instance().scheduleTask([wshared, confirm, token]() {
+    auto task = std::make_shared<Task>([wshared, confirm, token](UNUSED Task& task) {
         if (not confirm->replied and not confirm->listenTokens.empty()) {
             if (auto this_ = wshared.lock()) {
                 RING_DBG("[Account %s] [message %" PRIx64 "] timeout", this_->getAccountID().c_str(), token);
@@ -3337,7 +3332,8 @@ RingAccount::sendTextMessage(const std::string& to, const std::map<std::string, 
                 this_->messageEngine_.onMessageSent(token, false);
             }
         }
-    }, std::chrono::steady_clock::now() + std::chrono::minutes(1));
+    });
+    task->schedule(std::chrono::minutes(1));
 }
 
 void

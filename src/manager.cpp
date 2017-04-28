@@ -353,9 +353,8 @@ struct Manager::ManagerPimpl
 
     decltype(eventHandlerMap_)::iterator nextEventHandler_;
 
-    std::list<std::function<bool()>> pendingTaskList_;
-    std::multimap<std::chrono::steady_clock::time_point, std::shared_ptr<Manager::Runnable>> scheduledTasks_;
     std::mutex scheduledTasksMutex_;
+    std::multimap<Task::TimePoint, std::shared_ptr<Task>> scheduledTasks_;
 
     // Map containing conference pointers
     ConferenceMap conferenceMap_;
@@ -1662,30 +1661,25 @@ Manager::unregisterEventHandler(uintptr_t handlerId)
 }
 
 void
-Manager::addTask(const std::function<bool()>&& task)
+Manager::addTask(std::function<bool()>&& callable)
 {
-    std::lock_guard<std::mutex> lock(pimpl_->scheduledTasksMutex_);
-    pimpl_->pendingTaskList_.emplace_back(std::move(task));
-}
-
-std::shared_ptr<Manager::Runnable>
-Manager::scheduleTask(const std::function<void()>&& task, std::chrono::steady_clock::time_point when)
-{
-    auto runnable = std::make_shared<Runnable>(std::move(task));
-    scheduleTask(runnable, when);
-    return runnable;
+    scheduleTask(std::make_shared<Task>(
+        [callable](Task& task){
+            if (callable())
+                task.schedule();
+        }), Task::Clock::now());
 }
 
 void
-Manager::scheduleTask(const std::shared_ptr<Runnable>& task, std::chrono::steady_clock::time_point when)
+Manager::scheduleTask(const std::shared_ptr<Task>& task, const Task::TimePoint& when)
 {
     std::lock_guard<std::mutex> lock(pimpl_->scheduledTasksMutex_);
     pimpl_->scheduledTasks_.emplace(when, task);
-    RING_DBG("Task scheduled. Next in %" PRId64, std::chrono::duration_cast<std::chrono::seconds>(pimpl_->scheduledTasks_.begin()->first - std::chrono::steady_clock::now()).count());
 }
 
 // Must be invoked periodically by a timer from the main event loop
-void Manager::pollEvents()
+void
+Manager::pollEvents()
 {
     //-- Handlers
     {
@@ -1708,49 +1702,33 @@ void Manager::pollEvents()
         }
     }
 
-    //-- Scheduled tasks
+    auto now = Task::Clock::now();
+
+    //-- Search for scheduled tasks
+    std::list<std::shared_ptr<Task>> todo_list;
     {
-        auto now = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lock(pimpl_->scheduledTasksMutex_);
-        while (not pimpl_->scheduledTasks_.empty() && pimpl_->scheduledTasks_.begin()->first <= now) {
-            auto f = pimpl_->scheduledTasks_.begin();
-            auto task = std::move(f->second->cb);
-            if (task)
-                pimpl_->pendingTaskList_.emplace_back([task](){
-                    task();
-                    return false;
-                });
-            pimpl_->scheduledTasks_.erase(f);
+        auto item = std::begin(pimpl_->scheduledTasks_);
+        while (item != std::end(pimpl_->scheduledTasks_)) {
+            if (item->first >= now) {
+                todo_list.emplace_back(std::move(item->second));
+                item = pimpl_->scheduledTasks_.erase(item);
+            } else
+                ++item;
         }
     }
 
-    //-- Tasks
+    //-- Fire scheduled tasks
     {
-        decltype(pimpl_->pendingTaskList_) tmpList;
-        {
-            std::lock_guard<std::mutex> lock(pimpl_->scheduledTasksMutex_);
-            std::swap(pimpl_->pendingTaskList_, tmpList);
-        }
-        auto iter = std::begin(tmpList);
-        while (iter != tmpList.cend()) {
+        for (auto& task : todo_list) {
             if (pimpl_->finished_)
                 return;
 
-            auto next = std::next(iter);
-            bool result;
             try {
-                result = (*iter)();
+                (*task)();
             } catch (const std::exception& e) {
-                RING_ERR("MainLoop exception (task): %s", e.what());
-                result = false;
+                RING_ERR("MainLoop exception during task execution: %s", e.what());
             }
-            if (not result)
-                tmpList.erase(iter);
-            iter = next;
-        }
-        {
-            std::lock_guard<std::mutex> lock(pimpl_->scheduledTasksMutex_);
-            pimpl_->pendingTaskList_.splice(std::end(pimpl_->pendingTaskList_), tmpList);
         }
     }
 }
@@ -3092,5 +3070,11 @@ Manager::getVideoManager() const
     return *pimpl_->videoManager_;
 }
 #endif
+
+void
+Task::schedule(const TimePoint& when)
+{
+    Manager::instance().scheduleTask(shared_from_this(), when);
+}
 
 } // namespace ring

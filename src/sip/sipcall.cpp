@@ -673,7 +673,7 @@ SIPCall::sendTextMessage(const std::map<std::string, std::string>& messages,
     } else {
         if (inv) {
             try {
-                im::sendSipMessage(inv.get(), messages);
+                im::sendSipMessage(*transport_, getFromUri(), getPeerNumber(), messages);
             } catch (...) {}
         } else {
             pendingOutMessages_.emplace_back(messages, from);
